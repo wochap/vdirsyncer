@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.parse as urlparse
 import wsgiref.simple_server
 import wsgiref.util
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 REFRESH_URL = "https://www.googleapis.com/oauth2/v4/token"
+
+# Refresh the token this many seconds before expiry. Avoids a race where
+# the token expires between oauthlib's expiry check and Google receiving
+# the request, which Google then answers with 401.
+REFRESH_MARGIN = 60
 
 try:
     from aiohttp_oauthlib import OAuth2Session
@@ -67,13 +73,34 @@ class GoogleSession(dav.DAVSession):
         if not self._token:
             await self._init_token()
 
-        return await super().request(method, path, **kwargs)
+        # Proactively refresh when close to expiry (see REFRESH_MARGIN):
+        # expire the in-memory token so oauthlib's auto-refresh kicks in.
+        expires_at = self._token.get("expires_at")
+        if expires_at and time.time() > expires_at - REFRESH_MARGIN:
+            self._token["expires_at"] = 0
+
+        try:
+            return await super().request(method, path, **kwargs)
+        except aiohttp.ClientResponseError as e:
+            # Token expired between the expiry check and Google receiving
+            # the request. Force a refresh (as above) and retry once.
+            if e.status == 401:
+                self._token["expires_at"] = 0
+                return await super().request(method, path, **kwargs)
+            raise
+        except aiohttp.ServerDisconnectedError:
+            # Google drops keep-alive connections after auth failures,
+            # leaving a dead pooled connection. Retry on a fresh one.
+            return await super().request(method, path, **kwargs)
 
     async def _save_token(self, token):
         """Helper function called by OAuth2Session when a token is updated."""
         checkdir(expand_path(os.path.dirname(self._token_file)), create=True)
         with atomic_write(self._token_file, mode="w", overwrite=True) as f:
             json.dump(token, f)
+        # Keep the in-memory token in sync with the file: the _session
+        # property rebuilds the OAuth2Session from it on every request.
+        self._token = token
 
     @property
     def _session(self):
