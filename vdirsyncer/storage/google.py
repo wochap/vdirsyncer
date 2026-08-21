@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -43,6 +44,8 @@ except ImportError:
 
 
 class GoogleSession(dav.DAVSession):
+    _token_locks = {}
+
     def __init__(
         self,
         token_file,
@@ -64,12 +67,17 @@ class GoogleSession(dav.DAVSession):
         self.connector = connector
 
         self._token_file = Path(expand_path(token_file))
+        self._token_lock = self._token_locks.setdefault(self._token_file, asyncio.Lock())
         self._client_id = client_id
         self._client_secret = client_secret
         self._token = None
         self._redirect_uri = None
 
     async def request(self, method, path, **kwargs):
+        async with self._token_lock:
+            return await self._request(method, path, **kwargs)
+
+    async def _request(self, method, path, **kwargs):
         if not self._token:
             await self._init_token()
 
