@@ -78,7 +78,7 @@ class GoogleSession(dav.DAVSession):
         # expire the in-memory token so oauthlib's auto-refresh kicks in.
         expires_at = self._token.get("expires_at")
         if expires_at and time.time() > expires_at - REFRESH_MARGIN:
-            self._token["expires_at"] = 0
+            self._token["expires_at"] = 1
 
         try:
             return await super().request(method, path, **kwargs)
@@ -86,7 +86,7 @@ class GoogleSession(dav.DAVSession):
             # Token expired between the expiry check and Google receiving
             # the request. Force a refresh (as above) and retry once.
             if e.status == 401:
-                self._token["expires_at"] = 0
+                self._token["expires_at"] = 1
                 return await super().request(method, path, **kwargs)
             raise
     async def _save_token(self, token):
